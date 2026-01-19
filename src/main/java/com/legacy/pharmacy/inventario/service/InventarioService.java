@@ -4,6 +4,7 @@ import com.legacy.pharmacy.inventario.config.UserContext;                      /
 import com.legacy.pharmacy.inventario.dto.DashboardAlertasDTO;
 import com.legacy.pharmacy.inventario.dto.EntradaMercanciaDTO;
 import com.legacy.pharmacy.inventario.dto.StockDTO;                            // ← NUEVO
+import com.legacy.pharmacy.inventario.entity.Lote;
 import com.legacy.pharmacy.inventario.entity.Producto;                         // ← NUEVO
 import com.legacy.pharmacy.inventario.repository.LoteRepository;
 import com.legacy.pharmacy.inventario.repository.ProductoRepository;           // ← NUEVO
@@ -295,45 +296,66 @@ public class InventarioService {
         }
     }
 
+    @Transactional(readOnly = true) // <--- ESTO ES VITAL PARA QUE NO FALLE
     public DashboardAlertasDTO obtenerDashboardAlertas() {
-        // 1. Calcular Vencidos (Lotes con fecha < hoy y cantidad > 0)
-        String sqlVencidos = "SELECT COUNT(*) FROM lotes WHERE fecha_vencimiento < CURRENT_DATE AND cantidad_actual > 0";
-        Long totalVencidos = jdbcTemplate.queryForObject(sqlVencidos, Long.class);
+        LocalDate hoy = LocalDate.now();
 
-        // 2. Calcular Por Vencer (Lotes vencen en próximos 30 días)
-        String sqlPorVencer = "SELECT COUNT(*) FROM lotes WHERE fecha_vencimiento BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL 30 DAY) AND cantidad_actual > 0";
-        Long totalPorVencer = jdbcTemplate.queryForObject(sqlPorVencer, Long.class);
+        // 1. OBTENER VENCIDOS
+        List<Lote> lotesVencidos = loteRepository.findByFechaVencimientoBeforeAndCantidadActualGreaterThan(hoy, 0);
 
-        // 3. Obtener Productos con Stock Bajo (Usando el Repositorio que modificamos en el Paso 2)
-        List<Producto> productosCriticos = productoRepository.findProductosBajoStock();
-        long totalStockBajo = productosCriticos.size();
+        List<Map<String, Object>> listaVencidos = lotesVencidos.stream()
+                .map(l -> Map.<String, Object>of(
+                        "id", l.getId(),
+                        "producto", l.getProducto().getNombreComercial(), // Requiere transacción activa
+                        "lote", l.getNumeroLote(),
+                        "fecha", l.getFechaVencimiento(),
+                        "cantidad", l.getCantidadActual()
+                ))
+                .collect(java.util.stream.Collectors.toList()); // <--- CORRECCIÓN DE TIPO
 
-        // 4. Calcular Saludables (Total Productos Activos - Stock Bajo)
-        // Nota: Es una métrica aproximada.
+        // 2. OBTENER POR VENCER
+        List<Lote> lotesPorVencer = loteRepository.findByFechaVencimientoBetweenAndCantidadActualGreaterThan(hoy, hoy.plusDays(30), 0);
+
+        List<Map<String, Object>> listaPorVencer = lotesPorVencer.stream()
+                .map(l -> Map.<String, Object>of(
+                        "id", l.getId(),
+                        "producto", l.getProducto().getNombreComercial(),
+                        "lote", l.getNumeroLote(),
+                        "fecha", l.getFechaVencimiento(),
+                        "cantidad", l.getCantidadActual(),
+                        "diasRestantes", java.time.temporal.ChronoUnit.DAYS.between(hoy, l.getFechaVencimiento())
+                ))
+                .collect(java.util.stream.Collectors.toList()); // <--- CORRECCIÓN DE TIPO
+
+        // 3. OBTENER STOCK BAJO
+        List<Producto> productosBajoStock = productoRepository.findProductosBajoStock();
+
+        List<Map<String, Object>> listaStockBajo = productosBajoStock.stream()
+                .map(p -> {
+                    Integer stockReal = consultarStockActual(p.getId());
+                    return Map.<String, Object>of(
+                            "id", p.getId(),
+                            "nombre", p.getNombreComercial(),
+                            "stockActual", stockReal,
+                            "stockMinimo", p.getStockMinimo()
+                    );
+                })
+                .collect(java.util.stream.Collectors.toList()); // <--- CORRECCIÓN DE TIPO
+
+        // 4. CALCULAR SALUDABLES
         long totalProductos = productoRepository.count();
-        long totalSaludables = Math.max(0, totalProductos - totalStockBajo);
+        long totalSaludables = Math.max(0, totalProductos - listaStockBajo.size());
 
-        // 5. Mapear la lista de productos críticos para el JSON detallado
-        List<Map<String, Object>> listaDetallada = productosCriticos.stream().map(p -> {
-            Integer stockReal = consultarStockActual(p.getId()); // Reutilizamos tu método existente
-            return Map.<String, Object>of(
-                    "id", p.getId(),
-                    "nombre", p.getNombreComercial(),
-                    "stockActual", stockReal,
-                    "stockMinimo", p.getStockMinimo()
-            );
-        }).toList();
-
-        // 6. Construir respuesta
+        // 5. CONSTRUIR RESPUESTA
         return DashboardAlertasDTO.builder()
-                .totalVencidos(totalVencidos != null ? totalVencidos : 0)
-                .totalPorVencer(totalPorVencer != null ? totalPorVencer : 0)
-                .totalStockBajo(totalStockBajo)
+                .totalVencidos(listaVencidos.size())
+                .totalPorVencer(listaPorVencer.size())
+                .totalStockBajo(listaStockBajo.size())
                 .totalSaludables(totalSaludables)
-                .productosBajoStock(listaDetallada)
+                .listaVencidos(listaVencidos)
+                .listaPorVencer(listaPorVencer)
+                .listaStockBajo(listaStockBajo)
                 .build();
     }
-
-
 
 }
