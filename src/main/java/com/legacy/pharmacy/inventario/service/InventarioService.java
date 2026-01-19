@@ -1,6 +1,7 @@
 package com.legacy.pharmacy.inventario.service;
 
 import com.legacy.pharmacy.inventario.config.UserContext;                      // ← NUEVO
+import com.legacy.pharmacy.inventario.dto.DashboardAlertasDTO;
 import com.legacy.pharmacy.inventario.dto.EntradaMercanciaDTO;
 import com.legacy.pharmacy.inventario.dto.StockDTO;                            // ← NUEVO
 import com.legacy.pharmacy.inventario.entity.Producto;                         // ← NUEVO
@@ -43,6 +44,25 @@ public class InventarioService {
                 entrada.getObservaciones()
         );
     }
+
+    // AGREGA ESTO A InventarioService.java
+
+    @Transactional
+    public Map<String, Object> registrarEntradaMasiva(List<EntradaMercanciaDTO> entradas) {
+        int procesados = 0;
+
+        for (EntradaMercanciaDTO dto : entradas) {
+            // Reutilizamos la lógica que ya tienes para registrar uno solo
+            registrarEntrada(dto);
+            procesados++;
+        }
+
+        return Map.of(
+                "mensaje", "Se han procesado correctamente los lotes.",
+                "cantidadProcesada", procesados
+        );
+    }
+
 
     // --- MÉTODO DE SALIDA ---
     @Transactional
@@ -216,4 +236,104 @@ public class InventarioService {
             throw new RuntimeException("Error al devolver inventario: " + e.getMessage(), e);
         }
     }
+
+    // ==========================================
+    // LÓGICA EXCLUSIVA PARA INTEGRACIÓN CON VENTAS
+    // ==========================================
+
+    // 1. Consultar Stock (Suma la cantidad actual de todos los lotes válidos)
+    public Integer consultarStockActual(Integer productoId) {
+        String sql = "SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes " +
+                "WHERE producto_id = ? AND cantidad_actual > 0 AND fecha_vencimiento > CURRENT_DATE";
+
+        return jdbcTemplate.queryForObject(sql, Integer.class, productoId);
+    }
+
+    // 2. Descontar Inventario (Lógica FIFO/FEFO automática)
+    @Transactional
+    public void descontarInventarioVenta(Integer productoId, Integer cantidad) {
+        // Verificar stock primero
+        Integer stock = consultarStockActual(productoId);
+        if (stock < cantidad) {
+            throw new RuntimeException("Stock insuficiente. Disponible: " + stock);
+        }
+
+        // Llamamos a tu SP existente o lógica de descuento
+        // Asumiendo que usas el repositorio de Lotes que ya tenías:
+        loteRepository.registrarSalida(
+                productoId,
+                cantidad,
+                "MS-VENTAS", // Usuario responsable
+                1, // Sucursal Default
+                null,
+                "VENTA_EXTERNA"
+        );
+    }
+
+    // 3. Reponer Inventario (Devolución)
+    @Transactional
+    public void reponerInventarioDevolucion(Integer productoId, Integer cantidad) {
+        // Buscamos el último lote activo para sumarle ahí (simplificado)
+        // O insertamos un movimiento de entrada
+        String sqlLote = "SELECT id FROM lotes WHERE producto_id = ? ORDER BY fecha_vencimiento DESC LIMIT 1";
+        try {
+            Integer loteId = jdbcTemplate.queryForObject(sqlLote, Integer.class, productoId);
+
+            // Insertamos el movimiento de retorno
+            String sqlInsert = "INSERT INTO movimientos (lote_id, tipo_movimiento, cantidad, usuario_responsable, sucursal_id, observaciones) " +
+                    "VALUES (?, 'DEVOLUCION', ?, 'MS-VENTAS', 1, 'Devolución de cliente')";
+
+            jdbcTemplate.update(sqlInsert, loteId, cantidad);
+
+            // NOTA: Asegúrate de que tu base de datos tenga un Trigger que actualice
+            // la tabla 'lotes' cuando se inserta en 'movimientos'.
+            // Si no tienes trigger, debes hacer el update manual aquí:
+            // jdbcTemplate.update("UPDATE lotes SET cantidad_actual = cantidad_actual + ? WHERE id = ?", cantidad, loteId);
+
+        } catch (Exception e) {
+            throw new RuntimeException("No se encontró lote para procesar la devolución");
+        }
+    }
+
+    public DashboardAlertasDTO obtenerDashboardAlertas() {
+        // 1. Calcular Vencidos (Lotes con fecha < hoy y cantidad > 0)
+        String sqlVencidos = "SELECT COUNT(*) FROM lotes WHERE fecha_vencimiento < CURRENT_DATE AND cantidad_actual > 0";
+        Long totalVencidos = jdbcTemplate.queryForObject(sqlVencidos, Long.class);
+
+        // 2. Calcular Por Vencer (Lotes vencen en próximos 30 días)
+        String sqlPorVencer = "SELECT COUNT(*) FROM lotes WHERE fecha_vencimiento BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL 30 DAY) AND cantidad_actual > 0";
+        Long totalPorVencer = jdbcTemplate.queryForObject(sqlPorVencer, Long.class);
+
+        // 3. Obtener Productos con Stock Bajo (Usando el Repositorio que modificamos en el Paso 2)
+        List<Producto> productosCriticos = productoRepository.findProductosBajoStock();
+        long totalStockBajo = productosCriticos.size();
+
+        // 4. Calcular Saludables (Total Productos Activos - Stock Bajo)
+        // Nota: Es una métrica aproximada.
+        long totalProductos = productoRepository.count();
+        long totalSaludables = Math.max(0, totalProductos - totalStockBajo);
+
+        // 5. Mapear la lista de productos críticos para el JSON detallado
+        List<Map<String, Object>> listaDetallada = productosCriticos.stream().map(p -> {
+            Integer stockReal = consultarStockActual(p.getId()); // Reutilizamos tu método existente
+            return Map.<String, Object>of(
+                    "id", p.getId(),
+                    "nombre", p.getNombreComercial(),
+                    "stockActual", stockReal,
+                    "stockMinimo", p.getStockMinimo()
+            );
+        }).toList();
+
+        // 6. Construir respuesta
+        return DashboardAlertasDTO.builder()
+                .totalVencidos(totalVencidos != null ? totalVencidos : 0)
+                .totalPorVencer(totalPorVencer != null ? totalPorVencer : 0)
+                .totalStockBajo(totalStockBajo)
+                .totalSaludables(totalSaludables)
+                .productosBajoStock(listaDetallada)
+                .build();
+    }
+
+
+
 }

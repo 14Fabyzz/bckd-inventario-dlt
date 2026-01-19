@@ -30,6 +30,13 @@ public class LoteController {
         return ResponseEntity.ok(lotes);
     }
 
+    @GetMapping("/por-vencer")
+    public ResponseEntity<List<Lote>> verLotesPorVencer() {
+        // Reutilizamos tu lógica existente de 'proximos-vencer' (ej. 30 días)
+        // O retornamos lista vacía si prefieres implementarlo luego
+        return ResponseEntity.ok(productoService.buscarLotesProximosVencer(30));
+    }
+
     // Aquí puedes mover los otros métodos de lotes que tenías sueltos
     // como @GetMapping("/vencidos"), @GetMapping("/proximos-vencer"), etc.
 }
