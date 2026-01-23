@@ -365,14 +365,4 @@ public class InventarioService {
     }
 
 
-    // Endpoint optimizado para el Escáner (Frontend)
-    @GetMapping("/productos/barras/{codigoBarras}/stock")
-    public ResponseEntity<StockDTO> consultarStockPorBarras(@PathVariable String codigoBarras) {
-        // 1. Buscamos el producto por su código
-        Producto producto = productoService.buscarPorCodigoBarras(codigoBarras);
-
-        // 2. Reutilizamos la lógica de stock que ya tienes, pasando el ID que acabamos de encontrar
-        return ResponseEntity.ok(inventarioService.consultarStock(producto.getId()));
-    }
-
 }
