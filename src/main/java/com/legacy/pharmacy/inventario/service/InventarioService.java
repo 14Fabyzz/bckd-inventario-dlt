@@ -90,48 +90,54 @@ public class InventarioService {
      * Este método será llamado por MS-Ventas antes de crear una venta
      */
     public StockDTO consultarStock(Integer productoId) {
-        log.info("Consultando stock del producto {} - Usuario: {}",
-                productoId, UserContext.getUsername());
+    log.info("Consultando stock del producto {} - Usuario: {}",
+            productoId, UserContext.getUsername());
 
-        Producto producto = productoRepository.findById(productoId)
-                .orElseThrow(() -> new RuntimeException("Producto no encontrado: " + productoId));
+    // 1. Buscas el producto
+    Producto producto = productoRepository.findById(productoId)
+            .orElseThrow(() -> new RuntimeException("Producto no encontrado: " + productoId));
 
-        // ⭐ CORREGIDO: cantidad_actual en lugar de cantidad
-        Integer disponible = jdbcTemplate.queryForObject(
-                "SELECT COALESCE(SUM(cantidad_actual), 0) " +
-                        "FROM lotes " +
-                        "WHERE producto_id = ? " +
-                        "AND cantidad_actual > 0 " +
-                        "AND fecha_vencimiento > CURDATE()",
-                Integer.class,
-                productoId
-        );
+    // 2. Calculas el disponible
+    Integer disponible = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(SUM(cantidad_actual), 0) " +
+                    "FROM lotes " +
+                    "WHERE producto_id = ? " +
+                    "AND cantidad_actual > 0 " +
+                    "AND fecha_vencimiento > CURDATE()",
+            Integer.class,
+            productoId
+    );
 
-        // Determinar estado del stock
-        String estado;
-        if (disponible == null || disponible == 0) {
-            estado = "SIN_STOCK";
-        } else if (disponible <= producto.getStockMinimo()) {
-            estado = "STOCK_BAJO";
-        } else {
-            estado = "STOCK_OK";
-        }
-
-        // Crear y llenar el DTO de respuesta
-        StockDTO stock = new StockDTO();
-        stock.setProductoId(producto.getId());
-        stock.setNombreProducto(producto.getNombreComercial());
-        stock.setCantidadDisponible(disponible != null ? disponible : 0);
-        stock.setCantidadMinima(producto.getStockMinimo());
-        stock.setEstado(estado);
-        stock.setDisponibleParaVenta(
-                disponible != null && disponible > 0 && "ACTIVO".equals(producto.getEstado())
-        );
-
-        log.debug("Stock consultado: disponible={}, estado={}", disponible, estado);
-
-        return stock;
+    // 3. Determinar estado del stock (Esta parte faltaba en tu resumen)
+    String estado;
+    if (disponible == null || disponible == 0) {
+        estado = "SIN_STOCK";
+    } else if (disponible <= producto.getStockMinimo()) {
+        estado = "STOCK_BAJO";
+    } else {
+        estado = "STOCK_OK";
     }
+
+    // 4. Crear y llenar el DTO de respuesta
+    StockDTO stock = new StockDTO();
+    stock.setProductoId(producto.getId());
+    stock.setNombreProducto(producto.getNombreComercial());
+
+    // --- NUEVO: Agregamos el precio para ventas ---
+    stock.setPrecioVenta(producto.getPrecioVentaBase());
+    // ---------------------------------------------
+
+    stock.setCantidadDisponible(disponible != null ? disponible : 0);
+    stock.setCantidadMinima(producto.getStockMinimo());
+    stock.setEstado(estado);
+    stock.setDisponibleParaVenta(
+            disponible != null && disponible > 0 && "ACTIVO".equals(producto.getEstado())
+    );
+
+    log.debug("Stock consultado: disponible={}, estado={}", disponible, estado);
+
+    return stock;
+}
 
     /**
      * Descontar inventario después de una venta
@@ -356,6 +362,17 @@ public class InventarioService {
                 .listaPorVencer(listaPorVencer)
                 .listaStockBajo(listaStockBajo)
                 .build();
+    }
+
+
+    // Endpoint optimizado para el Escáner (Frontend)
+    @GetMapping("/productos/barras/{codigoBarras}/stock")
+    public ResponseEntity<StockDTO> consultarStockPorBarras(@PathVariable String codigoBarras) {
+        // 1. Buscamos el producto por su código
+        Producto producto = productoService.buscarPorCodigoBarras(codigoBarras);
+
+        // 2. Reutilizamos la lógica de stock que ya tienes, pasando el ID que acabamos de encontrar
+        return ResponseEntity.ok(inventarioService.consultarStock(producto.getId()));
     }
 
 }
